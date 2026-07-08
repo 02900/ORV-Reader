@@ -585,3 +585,123 @@ window.addEventListener('beforeunload', releaseWakeLock);
 
 // Optional: Release wake lock on history navigation
 window.addEventListener('popstate', releaseWakeLock);
+
+/* =====================================================================
+ * STV video tab — when story-teller-visualizer has finished video
+ * exports for this chapter, offer a Text/Video tab switch on the read
+ * page. Fails silent (plain text reader) when STV is unreachable.
+ *
+ * Config (browser console) — where STV lives:
+ *   localStorage.setItem('stv_config', JSON.stringify({
+ *     apiBase:  'http://127.0.0.1:3000',   // STV front door (/api/chapter-videos)
+ *     mediaBase:'http://127.0.0.1:3042',   // media server (video files)
+ *   }))
+ * Defaults target STV running on the same machine.
+ * ===================================================================== */
+(function () {
+    const pageMatch = location.pathname.match(/\/stories\/([a-z0-9-]+)\/read\/ch_(\d+)/);
+    if (!pageMatch) return;
+    const story = pageMatch[1];
+    const number = parseInt(pageMatch[2], 10);
+
+    const DEFAULTS = {
+        apiBase: 'http://127.0.0.1:3000',
+        mediaBase: 'http://127.0.0.1:3042',
+    };
+    let cfg = DEFAULTS;
+    try {
+        cfg = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('stv_config') || '{}'));
+    } catch (_) { /* bad JSON → defaults */ }
+
+    document.addEventListener('DOMContentLoaded', async function () {
+        const article = document.querySelector('article.orv_main');
+        if (!article) return;
+
+        let videos = [];
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 5000);
+            const res = await fetch(
+                cfg.apiBase + '/api/chapter-videos?story=' + encodeURIComponent(story) + '&number=' + number,
+                { signal: ctrl.signal },
+            );
+            clearTimeout(timer);
+            if (res.ok) videos = (await res.json()).videos || [];
+        } catch (_) {
+            return; // STV offline/unreachable → keep the plain text reader
+        }
+        if (!videos.length) return;
+
+        // --- styles ------------------------------------------------------
+        const style = document.createElement('style');
+        style.textContent = [
+            '.stv_tabs { display:flex; gap:.5rem; justify-content:center; margin:0 0 1.25rem; }',
+            '.stv_tabs button { padding:.35rem 1.1rem; border:1px solid currentColor; border-radius:9999px;',
+            '  background:transparent; color:inherit; cursor:pointer; font:inherit; opacity:.55; }',
+            '.stv_tabs button.stv_active { opacity:1; font-weight:600; }',
+            '.stv_video_pane { margin-bottom:1.5rem; }',
+            '.stv_video_pane video { width:100%; max-height:80vh; border-radius:8px; background:#000; }',
+            '.stv_video_pane select { margin:0 auto .75rem; display:block; padding:.25rem .5rem;',
+            '  background:transparent; color:inherit; border:1px solid currentColor; border-radius:6px; }',
+        ].join('\n');
+        document.head.appendChild(style);
+
+        // --- video pane ----------------------------------------------------
+        const pane = document.createElement('div');
+        pane.className = 'stv_video_pane';
+        pane.style.display = 'none';
+
+        let select = null;
+        if (videos.length > 1) {
+            select = document.createElement('select');
+            videos.forEach(function (v, i) {
+                const opt = document.createElement('option');
+                opt.value = String(i);
+                opt.textContent = (v.audioLanguage || '?') + ' · ' + (v.versionLabel || 'export');
+                select.appendChild(opt);
+            });
+            pane.appendChild(select);
+        }
+
+        const video = document.createElement('video');
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'none';
+        pane.appendChild(video);
+        article.parentNode.insertBefore(pane, article);
+
+        function loadVideo(i) {
+            const v = videos[i];
+            if (!v || !v.videoUrl) return;
+            video.src = cfg.mediaBase + '/' + v.videoUrl.replace(/^\//, '');
+        }
+        if (select) select.addEventListener('change', function () { loadVideo(Number(select.value)); });
+
+        // --- tabs ----------------------------------------------------------
+        const tabs = document.createElement('div');
+        tabs.className = 'stv_tabs';
+        const btnText = document.createElement('button');
+        btnText.textContent = 'Texto';
+        btnText.className = 'stv_active';
+        const btnVideo = document.createElement('button');
+        btnVideo.textContent = 'Video';
+        tabs.appendChild(btnText);
+        tabs.appendChild(btnVideo);
+        article.parentNode.insertBefore(tabs, pane);
+
+        btnText.addEventListener('click', function () {
+            btnText.classList.add('stv_active');
+            btnVideo.classList.remove('stv_active');
+            pane.style.display = 'none';
+            article.style.display = '';
+            video.pause();
+        });
+        btnVideo.addEventListener('click', function () {
+            btnVideo.classList.add('stv_active');
+            btnText.classList.remove('stv_active');
+            article.style.display = 'none';
+            pane.style.display = '';
+            if (!video.src) loadVideo(0);
+        });
+    });
+})();
